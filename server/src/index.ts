@@ -29,8 +29,12 @@ const bigTaskSelect = `SELECT id, project_id AS projectId, title, start_date AS 
 const taskSelect = `SELECT concrete_tasks.id, concrete_tasks.big_task_id AS bigTaskId, concrete_tasks.title, concrete_tasks.status, concrete_tasks.assignee_id AS assigneeId, members.name AS assigneeName, members.color AS assigneeColor FROM concrete_tasks LEFT JOIN members ON members.id = concrete_tasks.assignee_id`;
 
 app.get('/api/projects', (_req, res) => {
-  const projects = db.prepare(`${projectSelect} ORDER BY CASE WHEN date('now') BETWEEN start_date AND end_date THEN 0 ELSE 1 END, created_at DESC`).all();
-  res.json(projects);
+  const projects = db.prepare(`${projectSelect} ORDER BY CASE WHEN date('now') BETWEEN start_date AND end_date THEN 0 ELSE 1 END, created_at DESC`).all() as { id: string; name: string; startDate: string; endDate: string; createdAt: string }[];
+  const allTasks = db.prepare(`SELECT concrete_tasks.id, concrete_tasks.big_task_id AS bigTaskId, concrete_tasks.title, concrete_tasks.status, concrete_tasks.assignee_id AS assigneeId, big_tasks.project_id AS projectId FROM concrete_tasks JOIN big_tasks ON big_tasks.id = concrete_tasks.big_task_id ORDER BY concrete_tasks.created_at ASC, concrete_tasks.rowid ASC`).all() as { id: string; bigTaskId: string; title: string; status: string; assigneeId: string | null; projectId: string }[];
+  res.json(projects.map(project => ({
+    ...project,
+    tasks: allTasks.filter(task => task.projectId === project.id),
+  })));
 });
 
 app.post('/api/projects', (req, res) => {
@@ -169,29 +173,64 @@ app.get('/api/projects/:projectId/detail', (req, res) => {
   const project = db.prepare(`${projectSelect} WHERE id = ?`).get(req.params.projectId);
   if (!project) { res.status(404).json({ error: '找不到该项目。' }); return; }
   const bigTasks = db.prepare(`${bigTaskSelect} WHERE project_id = ? ORDER BY start_date, created_at`).all(req.params.projectId);
-  const tasks = db.prepare(`${taskSelect} JOIN big_tasks ON big_tasks.id = concrete_tasks.big_task_id WHERE big_tasks.project_id = ? ORDER BY concrete_tasks.created_at ASC`).all(req.params.projectId);
+  const tasks = db.prepare(`${taskSelect} JOIN big_tasks ON big_tasks.id = concrete_tasks.big_task_id WHERE big_tasks.project_id = ? ORDER BY concrete_tasks.created_at ASC, concrete_tasks.rowid ASC`).all(req.params.projectId);
   res.json({ project, bigTasks, tasks });
 });
+
+const validTaskStatuses = new Set(['not-started', 'in-progress', 'completed']);
+
+function validateTaskAssignee(assigneeId: unknown): assigneeId is string | null {
+  return assigneeId === null || (typeof assigneeId === 'string' && db.prepare('SELECT id FROM members WHERE id = ?').get(assigneeId) !== undefined);
+}
+
+function insertConcreteTask(bigTaskId: string, title: unknown = '未命名事项', status: unknown = 'not-started', assigneeId: unknown = null) {
+  if (typeof title !== 'string' || !title.trim() || typeof status !== 'string' || !validTaskStatuses.has(status)) {
+    return { error: '请先创建任务分组并填写有效任务。' } as const;
+  }
+  if (!validateTaskAssignee(assigneeId)) {
+    return { error: '负责人不在当前花名册中。' } as const;
+  }
+  const id = randomUUID();
+  db.prepare('INSERT INTO concrete_tasks (id, big_task_id, title, status, assignee_id) VALUES (?, ?, ?, ?, ?)').run(id, bigTaskId, title.trim(), status, assigneeId);
+  return { task: db.prepare(`${taskSelect} WHERE concrete_tasks.id = ?`).get(id) } as const;
+}
+
+app.get('/api/big-tasks/:bigTaskId/tasks', (req, res) => {
+  const bigTask = db.prepare('SELECT id FROM big_tasks WHERE id = ?').get(req.params.bigTaskId);
+  if (!bigTask) { res.status(404).json({ error: '找不到该大任务。' }); return; }
+  const tasks = db.prepare(`${taskSelect} WHERE concrete_tasks.big_task_id = ? ORDER BY concrete_tasks.created_at ASC, concrete_tasks.rowid ASC`).all(req.params.bigTaskId);
+  res.json(tasks);
+});
+
+app.post('/api/big-tasks/:bigTaskId/tasks', (req, res) => {
+  const bigTask = db.prepare('SELECT id FROM big_tasks WHERE id = ?').get(req.params.bigTaskId) as { id: string } | undefined;
+  if (!bigTask) { res.status(404).json({ error: '找不到该大任务。' }); return; }
+  const { title = '未命名事项', status = 'not-started', assigneeId = null } = req.body ?? {};
+  const result = insertConcreteTask(bigTask.id, title, status, assigneeId);
+  if ('error' in result) { res.status(400).json({ error: result.error }); return; }
+  res.status(201).json(result.task);
+});
+
 app.post('/api/projects/:projectId/tasks', (req, res) => {
-  const { title, status = 'not-started', assigneeId = null, bigTaskId } = req.body ?? {};
+  const { title = '未命名事项', status = 'not-started', assigneeId = null, bigTaskId } = req.body ?? {};
   const bigTask = bigTaskId
     ? db.prepare('SELECT id FROM big_tasks WHERE id = ? AND project_id = ?').get(bigTaskId, req.params.projectId) as { id: string } | undefined
     : db.prepare('SELECT id FROM big_tasks WHERE project_id = ? ORDER BY created_at ASC LIMIT 1').get(req.params.projectId) as { id: string } | undefined;
-  if (!bigTask || typeof title !== 'string' || !title.trim() || !['not-started','in-progress','completed'].includes(status)) { res.status(400).json({ error: '请先创建任务分组并填写有效任务。' }); return; }
-  if (assigneeId !== null && (typeof assigneeId !== 'string' || db.prepare('SELECT id FROM members WHERE id = ?').get(assigneeId) === undefined)) { res.status(400).json({ error: '负责人不在当前花名册中。' }); return; }
-  const id = randomUUID();
-  db.prepare('INSERT INTO concrete_tasks (id, big_task_id, title, status, assignee_id) VALUES (?, ?, ?, ?, ?)').run(id, bigTask.id, title.trim(), status, assigneeId);
-  res.status(201).json(db.prepare(taskSelect + ' WHERE concrete_tasks.id = ?').get(id));
+  if (!bigTask) { res.status(400).json({ error: '请先创建任务分组并填写有效任务。' }); return; }
+  const result = insertConcreteTask(bigTask.id, title, status, assigneeId);
+  if ('error' in result) { res.status(400).json({ error: result.error }); return; }
+  res.status(201).json(result.task);
 });
+
 app.patch('/api/tasks/:id', (req, res) => {
-  const { title, status, assigneeId } = req.body ?? {};
-  const current = db.prepare('SELECT id FROM concrete_tasks WHERE id = ?').get(req.params.id);
+  const { title, status, assigneeId, bigTaskId } = req.body ?? {};
+  const current = db.prepare('SELECT id, big_task_id AS bigTaskId, title, status, assignee_id AS assigneeId FROM concrete_tasks WHERE id = ?').get(req.params.id) as { id: string; bigTaskId: string; title: string; status: string; assigneeId: string | null } | undefined;
   if (!current) { res.status(404).json({ error: '找不到该任务。' }); return; }
+  if (bigTaskId !== undefined && bigTaskId !== current.bigTaskId) { res.status(400).json({ error: '具体任务不支持跨大任务移动。' }); return; }
   if (title !== undefined && (typeof title !== 'string' || !title.trim())) { res.status(400).json({ error: '任务名称不能为空。' }); return; }
-  if (status !== undefined && !['not-started','in-progress','completed'].includes(status)) { res.status(400).json({ error: '任务状态无效。' }); return; }
-  if (assigneeId !== undefined && assigneeId !== null && (typeof assigneeId !== 'string' || db.prepare('SELECT id FROM members WHERE id = ?').get(assigneeId) === undefined)) { res.status(400).json({ error: '负责人不在当前花名册中。' }); return; }
-  const old = db.prepare('SELECT title, status, assignee_id AS assigneeId FROM concrete_tasks WHERE id = ?').get(req.params.id) as { title: string; status: string; assigneeId: string | null };
-  db.prepare('UPDATE concrete_tasks SET title = ?, status = ?, assignee_id = ? WHERE id = ?').run(title === undefined ? old.title : title.trim(), status === undefined ? old.status : status, assigneeId === undefined ? old.assigneeId : assigneeId, req.params.id);
+  if (status !== undefined && (typeof status !== 'string' || !validTaskStatuses.has(status))) { res.status(400).json({ error: '任务状态无效。' }); return; }
+  if (assigneeId !== undefined && !validateTaskAssignee(assigneeId)) { res.status(400).json({ error: '负责人不在当前花名册中。' }); return; }
+  db.prepare('UPDATE concrete_tasks SET title = ?, status = ?, assignee_id = ? WHERE id = ?').run(title === undefined ? current.title : title.trim(), status === undefined ? current.status : status, assigneeId === undefined ? current.assigneeId : assigneeId, req.params.id);
   res.json(db.prepare(taskSelect + ' WHERE concrete_tasks.id = ?').get(req.params.id));
 });
 app.delete('/api/tasks/:id', (req, res) => {

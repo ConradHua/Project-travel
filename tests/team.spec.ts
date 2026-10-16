@@ -17,7 +17,7 @@ test('团队成员创建、编辑、指派与删除后取消指派', async ({ pa
     const row = page.locator('.member-row').filter({ hasText: memberName });
     await expect(row).toBeVisible();
     await page.getByRole('button', { name: '新建具体任务' }).click();
-    const assignee = page.getByLabel('新具体任务 负责人');
+    const assignee = page.getByLabel('未命名事项 负责人');
     await assignee.selectOption({ label: memberName });
     await expect(assignee).toHaveValue(/.+/);
     memberId = await assignee.inputValue();
