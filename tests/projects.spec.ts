@@ -1,8 +1,10 @@
 import { test, expect } from '@playwright/test';
 
+const apiBase = `http://localhost:${process.env.API_PORT ?? 3002}`;
+
 test.beforeEach(async ({ request }) => {
-  const projects = await (await request.get('http://localhost:3001/api/projects')).json() as { id: string }[];
-  for (const project of projects) await request.delete(`http://localhost:3001/api/projects/${project.id}`);
+  const projects = await (await request.get(`${apiBase}/api/projects`)).json() as { id: string }[];
+  for (const project of projects) await request.delete(`${apiBase}/api/projects/${project.id}`);
 });
 
 test('项目创建默认日期、刷新恢复、取消删除与永久删除', async ({ page }) => {
