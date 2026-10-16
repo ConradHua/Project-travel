@@ -107,6 +107,9 @@ test.describe('大任务时间轴', () => {
     const bar = page.getByRole('button', { name: '选择大任务 跨月任务' });
     await drag(bar, 40, 200);
     expect((await projectDetail(request, project.id)).bigTasks.find(item => item.id === task.id)).toMatchObject({ startDate: dateAt(3), endDate: dateAt(6) });
+    await page.getByRole('button', { name: '周视图' }).click();
+    await expect(page.locator('.timeline.week')).toBeVisible();
+    expect((await projectDetail(request, project.id)).bigTasks.find(item => item.id === task.id)).toMatchObject({ startDate: dateAt(3), endDate: dateAt(6) });
   });
 
   test('周视图拖动按天吸附，并支持两端调整和至少一天', async ({ page, request }) => {
